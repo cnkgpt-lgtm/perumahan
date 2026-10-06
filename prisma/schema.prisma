@@ -1,0 +1,200 @@
+// Skema database SISTER — Sistem Informasi Cluster
+// Diadaptasi dari Kabar Warga (Laravel) ke Prisma/PostgreSQL.
+// Gambar (bukti bayar, foto kabar, KK, QRIS) disimpan sebagai Bytes di database
+// agar tahan di hosting serverless (Vercel).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  passwordHash String
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  pembayaranDicatat Payment[]           @relation("PencatatBayar")
+  pengeluaranDicatat Expense[]         @relation("PencatatPengeluaran")
+  pengajuanDitinjau PaymentSubmission[] @relation("PeninjauPengajuan")
+  kabarDitulis     Post[]              @relation("PenulisKabar")
+}
+
+model Setting {
+  key   String  @id
+  value String?
+}
+
+// Satu baris = satu rumah/keluarga di cluster.
+model Household {
+  id              String   @id @default(cuid())
+  nomor           Int      @default(autoincrement()) @unique // no. urut utk kode unik QRIS
+  number          String   @unique // no. rumah, mis. "A-12"
+  headName        String
+  phone           String?
+  kkNumber        String?
+  occupancyStatus String? // pemilik / kontrak / kosong
+  isActive        Boolean  @default(true)
+  note            String?
+  kkImage         Bytes?
+  kkImageType     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  members     HouseholdMember[]
+  payments    Payment[]
+  submissions PaymentSubmission[]
+}
+
+model HouseholdMember {
+  id             String    @id @default(cuid())
+  householdId    String
+  household      Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  nik            String?
+  name           String
+  gender         String?
+  birthPlace     String?
+  birthDate      DateTime?
+  religion       String?
+  education      String?
+  job            String?
+  maritalStatus  String?
+  familyRelation String?
+  phone          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([householdId, familyRelation])
+}
+
+model DuesType {
+  id          String    @id @default(cuid())
+  name        String
+  amount      Int
+  frequency   String    @default("bulanan") // bulanan | sekali
+  startsOn    DateTime?
+  dueOn       DateTime?
+  isActive    Boolean   @default(true)
+  description String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  payments    Payment[]
+  submissions PaymentSubmission[]
+}
+
+model Payment {
+  id             String    @id @default(cuid())
+  nomor          Int       @default(autoincrement()) @unique // no. urut untuk kuitansi
+  householdId    String
+  household      Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  duesTypeId     String
+  duesType       DuesType  @relation(fields: [duesTypeId], references: [id], onDelete: Cascade)
+  period         String    @default("") // "YYYY-MM" untuk bulanan, "" untuk sekali bayar
+  amount         Int
+  paidOn         DateTime  @db.Date
+  method         String    @default("tunai") // tunai | transfer
+  note           String?
+  recordedById   String?
+  recordedBy     User?     @relation("PencatatBayar", fields: [recordedById], references: [id], onDelete: SetNull)
+  submissionId   String?   @unique
+  submission     PaymentSubmission? @relation("PengajuanBayar", fields: [submissionId], references: [id], onDelete: SetNull)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([householdId, duesTypeId, period])
+  @@index([paidOn])
+}
+
+model Expense {
+  id           String   @id @default(cuid())
+  spentOn      DateTime @db.Date
+  description  String
+  amount       Int
+  recordedById String?
+  recordedBy   User?    @relation("PencatatPengeluaran", fields: [recordedById], references: [id], onDelete: SetNull)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([spentOn])
+}
+
+// Kabar: pengumuman | berita | kegiatan
+model Post {
+  id             String    @id @default(cuid())
+  title          String
+  slug           String    @unique
+  category       String    @default("pengumuman")
+  body           String
+  image          Bytes?
+  imageType      String?
+  eventStartsAt  DateTime?
+  eventLocation  String?
+  isPinned       Boolean   @default(false)
+  isPopup        Boolean   @default(false)
+  popupImage     Bytes?
+  popupImageType String?
+  publishedAt    DateTime?
+  authorId       String?
+  author         User?     @relation("PenulisKabar", fields: [authorId], references: [id], onDelete: SetNull)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([publishedAt, category])
+}
+
+model BankAccount {
+  id            String   @id @default(cuid())
+  bankName      String
+  accountNumber String?
+  accountName   String?
+  qrisImage     Bytes?
+  qrisImageType String?
+  qrisPayload   String?  @db.Text // payload QRIS statis; bila ada -> QRIS dinamis per nominal
+  isActive      Boolean  @default(true)
+  position      Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  submissions PaymentSubmission[]
+}
+
+// Pengajuan bukti bayar online dari warga (menunggu verifikasi pengurus)
+model PaymentSubmission {
+  id              String    @id @default(cuid())
+  code            String    @unique // kode 8 karakter untuk cek status
+  householdId     String
+  household       Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  duesTypeId      String
+  duesType        DuesType  @relation(fields: [duesTypeId], references: [id], onDelete: Cascade)
+  periods         Json      // string[] : ["2026-10"] atau [""] untuk sekali bayar
+  unitAmount      Int
+  uniqueCode      Int       @default(0) // 3 digit kode unik utk QRIS dinamis
+  bankAccountId   String?
+  bankAccount     BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  payerName       String?
+  phone           String?
+  note            String?
+  proofImage      Bytes
+  proofType       String    @default("image/jpeg")
+  status          String    @default("menunggu") // menunggu | disetujui | ditolak
+  approvedPeriods Json?
+  rejectReason    String?
+  reviewedById    String?
+  reviewedBy      User?     @relation("PeninjauPengajuan", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  payment         Payment?  @relation("PengajuanBayar")
+
+  @@index([status, createdAt])
+  @@index([householdId, duesTypeId, status])
+}
